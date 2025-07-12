@@ -1,41 +1,53 @@
-// This is a Vercel Serverless Function.
-// It takes an incoming request and is expected to send a response.
+// This is a Vercel Serverless Function that acts as a robust CORS proxy.
 export default async function handler(request, response) {
   // Get the target URL from the query parameters.
-  // e.g., if the request is /api/proxy?url=https://example.com, this will be "https://example.com"
   const { url } = request.query;
 
-  // If no URL is provided, send a "Bad Request" error.
   if (!url) {
     return response.status(400).send('Error: The "url" query parameter is required.');
   }
 
   try {
-    // Fetch the content from the target URL provided by the client.
-    const targetResponse = await fetch(url);
+    // --- KEY CHANGE 1: DO NOT FOLLOW REDIRECTS AUTOMATICALLY ---
+    // We set `redirect: 'manual'` so that if the target URL gives us
+    // a redirect (like a 307), we can capture it instead of following it.
+    // This is essential for our download-link-finding process.
+    const targetResponse = await fetch(url, {
+      redirect: 'manual'
+    });
 
-    // Check if the fetch was successful.
-    if (!targetResponse.ok) {
-      // If not, forward the error status and text from the target.
-      const errorText = await targetResponse.text();
-      return response.status(targetResponse.status).send(errorText);
-    }
+    // --- KEY CHANGE 2: FORWARD ALL HEADERS FROM THE TARGET ---
+    // This ensures that important headers like 'Content-Disposition' (for downloads)
+    // and 'Location' (for redirects) are passed back to our app.
+    targetResponse.headers.forEach((value, name) => {
+      // Note: We avoid setting 'content-encoding' as Vercel handles compression.
+      if (name.toLowerCase() !== 'content-encoding') {
+        response.setHeader(name, value);
+      }
+    });
 
-    // Get the HTML content as a string.
-    const htmlContent = await targetResponse.text();
-
-    // --- This is the most important part for CORS ---
-    // Set headers to allow any origin to access this response.
+    // --- THIS IS THE MOST IMPORTANT PART FOR CORS ---
+    // We add our required CORS headers to the headers we are forwarding.
     response.setHeader('Access-Control-Allow-Origin', '*');
     response.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    // ------------------------------------------------
+    // We must also expose headers so the client can read them, especially 'Location'.
+    response.setHeader('Access-Control-Expose-Headers', 'Location, Content-Disposition');
 
-    // Send the fetched HTML content back to our app with a 200 OK status.
-    response.status(200).send(htmlContent);
+
+    // --- KEY CHANGE 3: FORWARD THE ORIGINAL STATUS CODE ---
+    // This passes the original status (e.g., 200 for OK, 307 for Redirect) to our app.
+    response.status(targetResponse.status);
+
+    // --- KEY CHANGE 4: FORWARD THE BODY AS-IS (BINARY SAFE) ---
+    // We read the response as a blob, which handles any content type
+    // (HTML, JSON, images, EPUB files, etc.) without corrupting it.
+    // We then send this blob back to our app.
+    const body = await targetResponse.blob();
+    response.send(body);
 
   } catch (error) {
-    // If any other error occurs (e.g., network issue), send a "Server Error" response.
+    // If any other error occurs, send a "Server Error" response.
     console.error(error);
     response.status(500).send(`Server error: ${error.message}`);
   }
